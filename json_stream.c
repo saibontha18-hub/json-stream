@@ -15,6 +15,7 @@ enum {
     ST_TRAILING, /* root value done: only whitespace may follow */
     ST_STRING,   /* inside a "..." token */
     ST_ESCAPED,  /* previous byte was a backslash inside a string */
+    ST_UNI,      /* inside a \uXXXX escape: uni_need hex digits to go */
     ST_NUMBER,   /* inside a number token */
     ST_LITERAL   /* inside true/false/null */
 };
@@ -29,6 +30,46 @@ static int is_ws(char c) {
 static int is_num_char(char c) {
     return (c >= '0' && c <= '9') || c == '-' || c == '+' || c == '.' ||
            c == 'e' || c == 'E';
+}
+
+/* Strict JSON number: -?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?
+ * The scanner above is deliberately loose (it just needs to know where
+ * the token ends); this decides whether the token is actually a number.
+ * No leading zeros, no dangling '.' or 'e'. */
+static int number_ok(const char *s, size_t n) {
+    size_t i = 0;
+
+    if (i < n && s[i] == '-')
+        i++;
+
+    if (i < n && s[i] == '0') {
+        i++;
+    } else if (i < n && s[i] >= '1' && s[i] <= '9') {
+        while (i < n && s[i] >= '0' && s[i] <= '9')
+            i++;
+    } else {
+        return 0;
+    }
+
+    if (i < n && s[i] == '.') {
+        i++;
+        if (i >= n || s[i] < '0' || s[i] > '9')
+            return 0;
+        while (i < n && s[i] >= '0' && s[i] <= '9')
+            i++;
+    }
+
+    if (i < n && (s[i] == 'e' || s[i] == 'E')) {
+        i++;
+        if (i < n && (s[i] == '+' || s[i] == '-'))
+            i++;
+        if (i >= n || s[i] < '0' || s[i] > '9')
+            return 0;
+        while (i < n && s[i] >= '0' && s[i] <= '9')
+            i++;
+    }
+
+    return i == n;
 }
 
 static int fail(json_parser_t *p, json_err_t e) {
@@ -102,6 +143,7 @@ static int open_container(json_parser_t *p, int kind) {
     emit(p, kind == C_OBJECT ? JSON_EV_OBJECT_START : JSON_EV_ARRAY_START,
          NULL, 0);
     p->stack[p->depth++] = (unsigned char)kind;
+    p->comma_seen = 0;
     p->state = (kind == C_OBJECT) ? ST_KEY : ST_VALUE;
     return F_OK;
 }
@@ -133,23 +175,58 @@ static int feed_char(json_parser_t *p, const char *data, size_t i) {
             return F_OK;
         }
         if (c == '\\') {
-            /* TODO(day 2): validate the escape. JSON only allows
-               " \ / b f n r t u — for now anything may follow. */
             if (p->tok_in_scratch && tok_push(p, c))
                 return fail(p, JSON_ERR_TOKEN_TOO_LONG);
             p->state = ST_ESCAPED;
             return F_OK;
         }
-        /* TODO(day 2): reject unescaped control characters (< 0x20). */
+        /* Raw control characters are illegal in JSON strings — they
+         * have to be written as escapes. */
+        if ((unsigned char)c < 0x20)
+            return fail(p, JSON_ERR_UNEXPECTED_CHAR);
         if (p->tok_in_scratch && tok_push(p, c))
             return fail(p, JSON_ERR_TOKEN_TOO_LONG);
         return F_OK;
     }
 
     if (p->state == ST_ESCAPED) {
+        if (c == 'u') {
+            /* push the 'u' too — the escape bytes live in scratch
+             * once the token has spilled across a chunk boundary */
+            if (p->tok_in_scratch && tok_push(p, c))
+                return fail(p, JSON_ERR_TOKEN_TOO_LONG);
+            p->uni_need = 4;
+            p->state = ST_UNI;
+            return F_OK;
+        }
+        switch (c) {
+        case '"':
+        case '\\':
+        case '/':
+        case 'b':
+        case 'f':
+        case 'n':
+        case 'r':
+        case 't':
+            break;
+        default:
+            return fail(p, JSON_ERR_UNEXPECTED_CHAR);
+        }
         if (p->tok_in_scratch && tok_push(p, c))
             return fail(p, JSON_ERR_TOKEN_TOO_LONG);
         p->state = ST_STRING;
+        return F_OK;
+    }
+
+    if (p->state == ST_UNI) {
+        int hex = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') ||
+                  (c >= 'A' && c <= 'F');
+        if (!hex)
+            return fail(p, JSON_ERR_UNEXPECTED_CHAR);
+        if (p->tok_in_scratch && tok_push(p, c))
+            return fail(p, JSON_ERR_TOKEN_TOO_LONG);
+        if (--p->uni_need == 0)
+            p->state = ST_STRING;
         return F_OK;
     }
 
@@ -163,8 +240,8 @@ static int feed_char(json_parser_t *p, const char *data, size_t i) {
         {
             size_t n;
             const char *s = tok_end(p, data, i, &n);
-            /* TODO(day 2): strict number grammar — no leading zeros,
-               digits required around '.' and 'e', etc. */
+            if (!number_ok(s, n))
+                return fail(p, JSON_ERR_BAD_NUMBER);
             emit(p, JSON_EV_NUMBER, s, n);
             after_value(p);
         }
@@ -193,23 +270,29 @@ static int feed_char(json_parser_t *p, const char *data, size_t i) {
             return open_container(p, C_OBJECT);
         if (c == '[')
             return open_container(p, C_ARRAY);
-        if (c == ']') /* "[]" — the empty array closes here */
+        if (c == ']') { /* "[]" — the empty array closes here */
+            if (p->comma_seen)
+                return fail(p, JSON_ERR_TRAILING_COMMA);
             return close_container(p, C_ARRAY);
+        }
         /* '}' never valid here: "{}" closes from ST_KEY, so this is junk */
         if (c == '"') {
             tok_begin(p, data + i + 1);
             p->tok_is_key = 0;
+            p->comma_seen = 0;
             p->state = ST_STRING;
             return F_OK;
         }
         if (c == 't' || c == 'f' || c == 'n') {
             p->lit_expect = c == 't' ? "true" : c == 'f' ? "false" : "null";
             p->lit_matched = 1;
+            p->comma_seen = 0;
             p->state = ST_LITERAL;
             return F_OK;
         }
         if (c == '-' || (c >= '0' && c <= '9')) {
             tok_begin(p, data + i);
+            p->comma_seen = 0;
             p->state = ST_NUMBER;
             return F_OK;
         }
@@ -218,11 +301,15 @@ static int feed_char(json_parser_t *p, const char *data, size_t i) {
     case ST_KEY:
         if (is_ws(c))
             return F_OK;
-        if (c == '}') /* "{}" or end of object */
+        if (c == '}') { /* "{}" or end of object */
+            if (p->comma_seen)
+                return fail(p, JSON_ERR_TRAILING_COMMA);
             return close_container(p, C_OBJECT);
+        }
         if (c == '"') {
             tok_begin(p, data + i + 1);
             p->tok_is_key = 1;
+            p->comma_seen = 0;
             p->state = ST_STRING;
             return F_OK;
         }
@@ -241,7 +328,7 @@ static int feed_char(json_parser_t *p, const char *data, size_t i) {
         if (is_ws(c))
             return F_OK;
         if (c == ',') {
-            /* TODO(day 2): reject trailing commas like [1,]. */
+            p->comma_seen = 1;
             p->state = (p->stack[p->depth - 1] == C_OBJECT) ? ST_KEY : ST_VALUE;
             return F_OK;
         }
@@ -296,7 +383,7 @@ json_err_t json_feed(json_parser_t *p, const char *data, size_t len) {
      * spill — lit_matched already remembers how far we got. */
     if (len > 0 && !p->tok_in_scratch &&
         (p->state == ST_STRING || p->state == ST_ESCAPED ||
-         p->state == ST_NUMBER)) {
+         p->state == ST_UNI || p->state == ST_NUMBER)) {
         if (tok_spill(p, data, len)) {
             p->err = JSON_ERR_TOKEN_TOO_LONG;
             p->err_line = p->line;
@@ -315,10 +402,12 @@ json_err_t json_finish(json_parser_t *p) {
     if (p->state == ST_NUMBER) {
         /* A number ran right up to EOF. It must be sitting in scratch:
          * any feed that ended mid-number spilled it there. */
+        if (!number_ok(p->scratch, p->scratch_len))
+            return fail(p, JSON_ERR_BAD_NUMBER), (json_err_t)p->err;
         emit(p, JSON_EV_NUMBER, p->scratch, p->scratch_len);
         after_value(p);
     } else if (p->state == ST_STRING || p->state == ST_ESCAPED ||
-               p->state == ST_LITERAL) {
+               p->state == ST_UNI || p->state == ST_LITERAL) {
         return fail(p, JSON_ERR_UNEXPECTED_EOF), (json_err_t)p->err;
     }
 
@@ -337,6 +426,8 @@ const char *json_err_str(json_err_t e) {
     case JSON_ERR_TOKEN_TOO_LONG:  return "token exceeds scratch buffer";
     case JSON_ERR_BAD_LITERAL:      return "invalid literal";
     case JSON_ERR_TRAILING_DATA:    return "trailing data after root value";
+    case JSON_ERR_BAD_NUMBER:       return "invalid number";
+    case JSON_ERR_TRAILING_COMMA:   return "trailing comma";
     default:                       return "unknown error";
     }
 }

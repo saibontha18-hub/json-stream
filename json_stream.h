@@ -49,7 +49,9 @@ typedef enum {
     JSON_ERR_UNEXPECTED_EOF,  /* input ended mid-value/container */
     JSON_ERR_TOKEN_TOO_LONG,  /* token bigger than the scratch buffer */
     JSON_ERR_BAD_LITERAL,      /* "truz" and friends */
-    JSON_ERR_TRAILING_DATA     /* non-whitespace after the root value */
+    JSON_ERR_TRAILING_DATA,    /* non-whitespace after the root value */
+    JSON_ERR_BAD_NUMBER,       /* number that breaks the JSON grammar */
+    JSON_ERR_TRAILING_COMMA    /* "[1,]" and friends */
 } json_err_t;
 
 struct json_parser;
@@ -81,6 +83,12 @@ typedef struct json_parser {
     /* in-progress literal (true/false/null) */
     const char *lit_expect;
     size_t lit_matched;
+
+    /* \u escape in progress: hex digits still needed */
+    unsigned uni_need;
+
+    /* a ',' was just consumed; a closer here means a trailing comma */
+    int comma_seen;
 } json_parser_t;
 
 void json_parser_init(json_parser_t *p, json_event_cb cb, void *user);
