@@ -1,5 +1,6 @@
-/* Day-1 smoke test: core parser over chunked input.
- * The full suite (strict grammar, fuzz-ish round trips) lands on day 2. */
+/* Smoke test: core parser over chunked input.
+ * The full suite (strict grammar, chunk-boundary round trips) lives in
+ * test_json_stream.c. */
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>

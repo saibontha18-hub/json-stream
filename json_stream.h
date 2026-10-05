@@ -94,7 +94,12 @@ typedef struct json_parser {
 void json_parser_init(json_parser_t *p, json_event_cb cb, void *user);
 
 /* Feed a chunk. Returns JSON_OK, or the (sticky) error. May emit events,
- * including the completion of a token that started in an earlier chunk. */
+ * including the completion of a token that started in an earlier chunk.
+ *
+ * Preconditions (caller bugs, not checked): p is a valid parser, and data
+ * is non-NULL when len > 0. json_feed(p, NULL, 0) is a harmless no-op. A
+ * NULL callback is allowed — the input still parses, events are just
+ * dropped. */
 json_err_t json_feed(json_parser_t *p, const char *data, size_t len);
 
 /* Call when no more input is coming. Completes a number that ran right up
