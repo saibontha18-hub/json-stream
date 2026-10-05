@@ -1,0 +1,11 @@
+# build outputs
+*.o
+*.a
+tools/jsev
+tests/smoke_test
+tests/test_json_stream
+
+# editor / OS noise
+*.swp
+*~
+.DS_Store
