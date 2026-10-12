@@ -355,6 +355,19 @@ void json_parser_init(json_parser_t *p, json_event_cb cb, void *user) {
     p->state = ST_VALUE;
 }
 
+/* Same clean slate as init, but the callback/user survive — for parsing
+ * one document after another with the same parser. */
+void json_parser_reset(json_parser_t *p) {
+    json_event_cb cb = p->cb;
+    void *user = p->user;
+    memset(p, 0, sizeof *p);
+    p->cb = cb;
+    p->user = user;
+    p->line = 1;
+    p->col = 1;
+    p->state = ST_VALUE;
+}
+
 json_err_t json_feed(json_parser_t *p, const char *data, size_t len) {
     size_t i;
 
