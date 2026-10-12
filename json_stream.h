@@ -93,6 +93,11 @@ typedef struct json_parser {
 
 void json_parser_init(json_parser_t *p, json_event_cb cb, void *user);
 
+/* Re-arm the parser for a fresh document, keeping the callback and user
+ * pointer from init. Cheaper and less error-prone than re-passing them
+ * when you're parsing a stream of separate documents. */
+void json_parser_reset(json_parser_t *p);
+
 /* Feed a chunk. Returns JSON_OK, or the (sticky) error. May emit events,
  * including the completion of a token that started in an earlier chunk.
  *

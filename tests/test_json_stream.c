@@ -423,12 +423,39 @@ static void test_round_trip(void) {
     }
 }
 
+/* reset() clears sticky errors and half-parsed state but keeps the
+ * callback — for parsing one document after another with one parser. */
+static void test_reset(void) {
+    json_parser_t p;
+    json_parser_init(&p, on_event, NULL);
+
+    /* Poison it: trailing garbage leaves a sticky error. */
+    nev = 0;
+    CHECK(parse(&p, "{\"a\":1} junk", 0) == JSON_ERR_TRAILING_DATA);
+
+    /* Reset, then a fresh document parses clean and events still fire. */
+    json_parser_reset(&p);
+    nev = 0;
+    CHECK(parse(&p, "[1,2]", 0) == JSON_OK);
+    CHECK(nev > 0);
+    CHECK(etype[0] == JSON_EV_ARRAY_START);
+
+    /* Reset also works mid-document. */
+    fresh(&p);
+    CHECK(json_feed(&p, "{\"a\":", 5) == JSON_OK);
+    json_parser_reset(&p);
+    nev = 0;
+    CHECK(parse(&p, "true", 0) == JSON_OK);
+    CHECK(nev == 1 && etype[0] == JSON_EV_TRUE);
+}
+
 int main(void) {
     test_numbers();
     test_strings();
     test_trailing_commas();
     test_misc();
     test_round_trip();
+    test_reset();
 
     printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
